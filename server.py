@@ -1,5 +1,5 @@
 """Animora v4: auth, quotas, Gemini -> Groq fallback. Demo deployment, not production hardened."""
-import os, time, json, sqlite3, secrets, hashlib, hmac, asyncio
+import os, time, json, sqlite3, secrets, hashlib, hmac, asyncio, logging
 from pathlib import Path
 from datetime import datetime, timezone
 import httpx
@@ -12,6 +12,7 @@ ROOT=Path(__file__).resolve().parent
 DB=Path(os.getenv('ANIMORA_DB_PATH', '/tmp/animora.db' if os.getenv('RENDER') else str(ROOT/'animora.db')))
 DB.parent.mkdir(parents=True, exist_ok=True)
 app=FastAPI(title='Animora Studio API')
+logger=logging.getLogger('animora.ai')
 
 def db():
     c=sqlite3.connect(DB,timeout=15)
@@ -122,13 +123,18 @@ async def generate(prompt):
                     output=r.json()['choices'][0]['message']['content']
                 if isinstance(output,str) and output.strip():return output,name
                 errors.append(name+': empty response')
+                logger.warning('AI provider=%s model=%s error=empty_response',name,model)
             except (httpx.HTTPError,KeyError,IndexError,TypeError,ValueError) as exc:
-                errors.append(name+': '+str(getattr(getattr(exc,'response',None),'status_code',type(exc).__name__)))
+                status=getattr(getattr(exc,'response',None),'status_code',None)
+                error_code=str(status) if status is not None else type(exc).__name__
+                errors.append(name+': '+error_code)
+                logger.warning('AI provider=%s model=%s status=%s',name,model,error_code)
                 # Continue only for temporary availability, quota, or missing model issues.
                 # Auth errors are also skipped, allowing a separately configured provider.
     if not any(os.getenv(key) for _,key,_,_ in PROVIDERS):
         raise HTTPException(503,'AI API anahtarı tanımlanmamış. Render Environment bölümüne GEMINI_API_KEY ekleyin.')
-    raise HTTPException(503,'AI sağlayıcıları kullanılamıyor. API anahtarlarını ve ücretsiz kotaları kontrol edin.')
+    logger.error('All AI providers failed: %s', '; '.join(errors))
+    raise HTTPException(503,'AI sağlayıcıları kullanılamıyor. Render Logs bölümünde AI provider satırlarını kontrol edin.')
 
 @app.post('/api/script')
 async def script(p:ScriptRequest,authorization:str|None=Header(default=None)):
